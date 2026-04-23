@@ -68,14 +68,17 @@ def get_payments(
 
     payments = query.order_by(Payment.created_at.desc()).all()
 
-    total_collected = sum(p.amount for p in payments if p.status == PaymentStatus.PAID)
+    _refund_types = {"deposit_refund", "deposit"}
+    total_collected = sum(p.amount for p in payments if p.status == PaymentStatus.PAID and getattr(p, 'payment_type', None) not in _refund_types)
     total_pending = sum(p.amount for p in payments if p.status in [PaymentStatus.UNPAID, PaymentStatus.PARTIAL])
+    total_refunded = sum(p.amount for p in payments if getattr(p, 'payment_type', None) == "deposit_refund")
 
     return PaymentListResponse(
         payments=[_build_payment_response(p) for p in payments],
         total=len(payments),
         total_collected=total_collected,
         total_pending=total_pending,
+        total_refunded=total_refunded,
     )
 
 
@@ -103,14 +106,17 @@ def list_all_payments(
 
     payments = query.order_by(Payment.created_at.desc()).all()
 
-    total_collected = sum(p.amount for p in payments if p.status == PaymentStatus.PAID)
+    _refund_types = {"deposit_refund", "deposit"}
+    total_collected = sum(p.amount for p in payments if p.status == PaymentStatus.PAID and getattr(p, 'payment_type', None) not in _refund_types)
     total_pending = sum(p.amount for p in payments if p.status in [PaymentStatus.UNPAID, PaymentStatus.PARTIAL])
+    total_refunded = sum(p.amount for p in payments if getattr(p, 'payment_type', None) == "deposit_refund")
 
     return PaymentListResponse(
         payments=[_build_payment_response(p) for p in payments],
         total=len(payments),
         total_collected=total_collected,
         total_pending=total_pending,
+        total_refunded=total_refunded,
     )
 
 
@@ -142,5 +148,6 @@ def _build_payment_response(p: Payment) -> PaymentResponse:
         collected_by=collected_by,
         transaction_id=getattr(p, 'transaction_id', None),
         screenshot_path=getattr(p, 'screenshot_path', None),
+        payment_type=getattr(p, 'payment_type', None),
         created_at=p.created_at,
     )

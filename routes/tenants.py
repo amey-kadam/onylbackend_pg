@@ -6,7 +6,7 @@ from app.models.user import User, UserRole
 from app.models.tenant import Tenant, TenantStatus
 from app.models.bed import Bed, BedStatus
 from app.models.pg import PG
-from app.schemas.tenant import TenantCreate, TenantUpdate, TenantResponse, TenantListResponse, LedgerEntry, LedgerResponse
+from app.schemas.tenant import TenantCreate, TenantUpdate, TenantResponse, TenantListResponse, LedgerEntry, LedgerResponse, CheckoutRequest
 from app.utils.auth import hash_password
 from app.models.pg_staff import PGStaff
 from app.utils.dependencies import get_current_user, require_owner, require_owner_or_staff
@@ -59,6 +59,12 @@ def create_tenant(data: TenantCreate, db: Session = Depends(get_db), owner: User
     existing = db.query(User).filter(User.phone == data.phone).first()
     if existing:
         raise HTTPException(status_code=400, detail="Phone number already registered")
+
+    # Check email uniqueness (only if email provided)
+    if data.email:
+        existing_email = db.query(User).filter(User.email == data.email).first()
+        if existing_email:
+            raise HTTPException(status_code=400, detail="Email already registered with another account")
 
     # Create user account for tenant
     user = User(
@@ -141,8 +147,9 @@ def create_tenant(data: TenantCreate, db: Session = Depends(get_db), owner: User
             amount=tenant.deposit,
             status=PaymentStatus.PAID,
             month_year=datetime.now().strftime("%Y-%m"),
-            payment_method="cash", # Default to cash for initial deposit
+            payment_method="cash",
             payment_date=datetime.now().date(),
+            payment_type="deposit",
             notes="Initial Deposit"
         )
         db.add(payment)
@@ -174,6 +181,8 @@ def list_tenants(
         query = query.filter(Tenant.pg_id == pg_id)
     if status:
         query = query.filter(Tenant.status == TenantStatus(status))
+    else:
+        query = query.filter(Tenant.status != TenantStatus.DELETED)
     if search:
         query = query.filter(User.name.ilike(f"%{search}%"))
 
@@ -310,17 +319,33 @@ def get_tenant_ledger(
             status="paid", month_year=None, notes="Security deposit paid at joining",
         ))
 
-    # Rent payments
+    # Rent & checkout settlement payments
     payments = db.query(Payment).filter(Payment.tenant_id == tenant_id).order_by(Payment.payment_date.desc()).all()
+    _checkout_types = {"deposit_refund", "maintenance_deduction", "penalty"}
+    _checkout_titles = {
+        "deposit_refund": "Deposit Refund",
+        "maintenance_deduction": "Maintenance Deduction",
+        "penalty": "Penalty",
+    }
     for p in payments:
+        ptype = getattr(p, 'payment_type', None) or "rent"
+        # Skip initial deposit payments — already represented by the manual Security Deposit entry
+        if ptype == "deposit" or p.notes == "Initial Deposit":
+            continue
         collected_by_name = None
         if getattr(p, 'collected_by_user_id', None):
             from app.models.user import User as UserModel
             u = db.query(UserModel).filter(UserModel.id == p.collected_by_user_id).first()
             if u:
                 collected_by_name = u.name
+        if ptype in _checkout_types:
+            entry_type = ptype
+            title = _checkout_titles[ptype]
+        else:
+            entry_type = "rent"
+            title = f"Rent - {p.month_year}"
         entries.append(LedgerEntry(
-            id=p.id, entry_type="rent", title=f"Rent - {p.month_year}",
+            id=p.id, entry_type=entry_type, title=title,
             amount=p.amount, date=str(p.payment_date) if p.payment_date else None,
             status=p.status.value, month_year=p.month_year, notes=p.notes,
             payment_method=getattr(p, 'payment_method', 'cash'),
@@ -349,3 +374,99 @@ def get_tenant_ledger(
         total_maintenance_pending=total_maint_pending,
         opening_balance=tenant.deposit,
     )
+
+
+@router.post("/{tenant_id}/checkout", response_model=TenantResponse)
+def checkout_tenant(tenant_id: int, data: CheckoutRequest, db: Session = Depends(get_db), owner: User = Depends(require_owner)):
+    """Checkout a tenant: record settlement entries, mark as exited, vacate bed. Payment history is preserved."""
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    pg = db.query(PG).filter(PG.id == tenant.pg_id).first()
+    if not pg or pg.owner_id != owner.id:
+        raise HTTPException(status_code=403, detail="Not authorized to checkout this tenant")
+
+    if tenant.status != TenantStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Tenant is not active")
+
+    from datetime import date
+    from app.models.payment import Payment, PaymentStatus
+
+    checkout_date = data.checkout_date or date.today()
+    month_year = checkout_date.strftime("%Y-%m")
+
+    # Record ONE payment entry for the refund amount actually issued to tenant
+    if data.deposit_refund > 0:
+        parts = [f"Deposit Refund: ₹{data.deposit_refund:.0f}"]
+        if data.maintenance_deduction > 0:
+            parts.append(f"Maintenance deducted: ₹{data.maintenance_deduction:.0f}")
+        if data.penalty > 0:
+            parts.append(f"Penalty deducted: ₹{data.penalty:.0f}")
+        notes = " | ".join(parts)
+        db.add(Payment(
+            tenant_id=tenant.id,
+            amount=data.deposit_refund,
+            status=PaymentStatus.PAID,
+            payment_date=checkout_date,
+            month_year=month_year,
+            payment_method="cash",
+            payment_type="deposit_refund",
+            notes=notes,
+            collected_by_user_id=owner.id,
+        ))
+
+    # Vacate the bed
+    if tenant.bed_id:
+        bed = db.query(Bed).filter(Bed.id == tenant.bed_id).first()
+        if bed:
+            bed.status = BedStatus.VACANT
+        tenant.bed_id = None
+
+    # Mark as exited with checkout date
+    tenant.status = TenantStatus.EXITED
+    tenant.exit_date = checkout_date
+
+    db.commit()
+    db.refresh(tenant)
+
+    return _build_tenant_response(tenant)
+
+
+@router.delete("/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_tenant(tenant_id: int, db: Session = Depends(get_db), owner: User = Depends(require_owner)):
+    """Delete a tenant. Owner only."""
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    pg = db.query(PG).filter(PG.id == tenant.pg_id).first()
+    if not pg or pg.owner_id != owner.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this tenant")
+
+    # Vacate the bed
+    if tenant.bed_id:
+        bed = db.query(Bed).filter(Bed.id == tenant.bed_id).first()
+        if bed:
+            bed.status = BedStatus.VACANT
+        tenant.bed_id = None
+
+    # Clear uploaded documents
+    tenant.id_proof_url = None
+    tenant.aadhar_url = None
+    tenant.pan_url = None
+    tenant.agreement_url = None
+    tenant.ledger_url = None
+    tenant.other_documents_url = None
+
+    # Soft delete the tenant
+    tenant.status = TenantStatus.DELETED
+
+    # Alter user phone to free up the unique constraint
+    import uuid
+    if tenant.user:
+        tenant.user.phone = f"del_{uuid.uuid4().hex[:8]}_{tenant.user.phone}"
+
+    db.commit()
+    return
+

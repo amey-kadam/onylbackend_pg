@@ -29,6 +29,7 @@ class PaymentResponse(BaseModel):
     collected_by: Optional[str] = None
     transaction_id: Optional[str] = None
     screenshot_path: Optional[str] = None
+    payment_type: Optional[str] = None
     created_at: Optional[datetime] = None
 
     class Config:
@@ -40,3 +41,4 @@ class PaymentListResponse(BaseModel):
     total: int
     total_collected: float = 0.0
     total_pending: float = 0.0
+    total_refunded: float = 0.0

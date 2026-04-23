@@ -8,6 +8,7 @@ from app.database import Base
 class TenantStatus(str, enum.Enum):
     ACTIVE = "active"
     EXITED = "exited"
+    DELETED = "deleted"
 
 
 class Tenant(Base):

@@ -6,7 +6,7 @@ from datetime import date, datetime
 class TenantCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     phone: str = Field(..., min_length=10, max_length=15)
-    email: str = Field(..., description="Required for password recovery")
+    email: Optional[str] = Field(None, description="Used for password recovery")
     password: str = Field(default="tenant123", min_length=6)
     pg_id: int
     bed_id: Optional[int] = None
@@ -87,9 +87,16 @@ class TenantListResponse(BaseModel):
     per_page: int
 
 
+class CheckoutRequest(BaseModel):
+    deposit_refund: float = Field(default=0.0, ge=0)
+    maintenance_deduction: float = Field(default=0.0, ge=0)
+    penalty: float = Field(default=0.0, ge=0)
+    checkout_date: Optional[date] = None
+
+
 class LedgerEntry(BaseModel):
     id: int
-    entry_type: str        # "rent" | "maintenance" | "deposit"
+    entry_type: str        # "rent" | "maintenance" | "deposit" | "deposit_refund" | "maintenance_deduction" | "penalty"
     title: str
     amount: float
     date: Optional[str] = None

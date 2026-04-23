@@ -24,6 +24,7 @@ class Payment(Base):
     notes = Column(String(500), nullable=True)
     payment_method = Column(String(20), nullable=True, default="cash")  # "cash" | "online"
     collected_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    payment_type = Column(String(50), nullable=True, default="rent")  # rent | deposit | deposit_refund | maintenance_deduction | penalty
     transaction_id = Column(String(100), nullable=True)
     screenshot_path = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

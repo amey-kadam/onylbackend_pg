@@ -4,7 +4,7 @@ from app.config import get_settings
 from app.database import init_db
 from app.routes import auth, tenants, rooms, beds, payments, complaints, notices, dashboard, pgs
 from app.routes import cash_payments, maintenance, staff, upload, password_reset
-from app.routes import admin_features
+from app.routes import admin_features, reports
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -60,6 +60,7 @@ app.include_router(staff.router)
 app.include_router(upload.router)
 app.include_router(password_reset.router)
 app.include_router(admin_features.router)
+app.include_router(reports.router)
 
 import os
 if not os.path.exists("uploads"):
@@ -71,6 +72,60 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 def on_startup():
     """Initialize database tables on startup."""
     init_db()
+    _apply_migrations()
+
+
+def _apply_migrations():
+    """Add new columns to existing tables if they don't exist (PostgreSQL safe)."""
+    import sqlalchemy as sa
+    from app.database import engine
+    with engine.connect() as conn:
+
+        def has_column(table, column):
+            query = sa.text("""
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = :table AND column_name = :column
+            """)
+            return conn.execute(query, {"table": table, "column": column}).fetchone() is not None
+
+        # rooms
+        for col, defn in [
+            ("sharing_type", "VARCHAR(50) DEFAULT 'Sharing'"),
+            ("daily_stay_charges", "FLOAT DEFAULT 0.0"),
+            ("is_available_for_rent", "BOOLEAN NOT NULL DEFAULT TRUE"),
+            ("facilities", "VARCHAR(500) DEFAULT ''"),
+        ]:
+            if not has_column("rooms", col):
+                conn.execute(sa.text(f"ALTER TABLE rooms ADD COLUMN {col} {defn}"))
+
+        # beds
+        if not has_column("beds", "price_per_bed"):
+            conn.execute(sa.text("ALTER TABLE beds ADD COLUMN price_per_bed FLOAT"))
+
+        # tenants
+        for col, defn in [
+            ("move_out_date", "DATE"),
+            ("locking_period", "INTEGER DEFAULT 0"),
+            ("notice_period", "INTEGER DEFAULT 30"),
+            ("agreement_period", "INTEGER DEFAULT 11"),
+        ]:
+            if not has_column("tenants", col):
+                conn.execute(sa.text(f"ALTER TABLE tenants ADD COLUMN {col} {defn}"))
+
+        # payments
+        for col, defn in [
+            ("payment_method", "VARCHAR(20) DEFAULT 'cash'"),
+            ("collected_by_user_id", "INTEGER"),
+            ("payment_type", "VARCHAR(50) DEFAULT 'rent'"),
+        ]:
+            if not has_column("payments", col):
+                conn.execute(sa.text(f"ALTER TABLE payments ADD COLUMN {col} {defn}"))
+
+        # NOTE: password_reset_otps, pg_staff, and client_subscriptions
+        # are created by Base.metadata.create_all() in init_db() via ORM models.
+        # Do NOT add raw DDL here — it will fail on PostgreSQL.
+
+        conn.commit()
 
 
 @app.get("/", tags=["Health"])

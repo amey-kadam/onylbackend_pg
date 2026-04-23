@@ -1,7 +1,41 @@
+# Environment & secrets
 .env
+
+# Python virtual environment
 venv/
+
+# Python cache
 __pycache__/
 *.pyc
-pg_management.db
+*.pyo
+*.pyd
+.Python
+
+# Database files
+*.db
+*.sqlite3
+
+# Uploads & logs
 uploads/
 logs/
+
+# Gradle / Android build cache
+.gradle/
+build/
+*.lock
+*.bin
+*.properties
+local.properties
+GeneratedPluginRegistrant.java
+
+# iOS build artifacts
+*.xcworkspace
+Pods/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# IDE files
+.idea/
+*.iml
+.vscode/
